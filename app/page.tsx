@@ -3,6 +3,8 @@
 import { useRef, useState, useEffect, useCallback } from 'react';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
+import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar';
+import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
 
 interface AvatarData {
   imgData: ImageData;
@@ -10,12 +12,37 @@ interface AvatarData {
   col: number;
 }
 
+interface AvatarEdits {
+  brightness: number; contrast: number; saturation: number;
+  hue: number; rotation: number; opacity: number;
+  blur: number; scale: number; borderRadius: number;
+  grayscale: number; sepia: number; invert: number;
+  flipH: boolean; flipV: boolean;
+  makeSquare: boolean; padColor: string; padTransparent: boolean;
+}
+
+const DEFAULT_EDITS: AvatarEdits = {
+  brightness: 100, contrast: 100, saturation: 100,
+  hue: 0, rotation: 0, opacity: 100,
+  blur: 0, scale: 100, borderRadius: 0,
+  grayscale: 0, sepia: 0, invert: 0,
+  flipH: false, flipV: false,
+  makeSquare: false, padColor: '#ffffff', padTransparent: false,
+};
+
+function imageDataToUrl(imgData: ImageData): string {
+  const c = document.createElement('canvas');
+  c.width = imgData.width;
+  c.height = imgData.height;
+  c.getContext('2d')!.putImageData(imgData, 0, 0);
+  return c.toDataURL('image/png');
+}
+
 export default function Home() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const sourceCanvasRef = useRef<HTMLCanvasElement>(null);
   const gridOverlayRef = useRef<HTMLCanvasElement>(null);
   const editorCanvasRef = useRef<HTMLCanvasElement>(null);
-  const avatarsGridRef = useRef<HTMLDivElement>(null);
   const gridSectionRef = useRef<HTMLElement>(null);
   const avatarsSectionRef = useRef<HTMLElement>(null);
   const editorSectionRef = useRef<HTMLElement>(null);
@@ -26,8 +53,6 @@ export default function Home() {
   const sourceImageRef = useRef<HTMLImageElement | null>(null);
   const avatarImagesRef = useRef<AvatarData[]>([]);
   const selectedIndexRef = useRef(-1);
-  const flipHRef = useRef(false);
-  const flipVRef = useRef(false);
 
   const [cols, setCols] = useState(4);
   const [rows, setRows] = useState(3);
@@ -35,6 +60,7 @@ export default function Home() {
   const [showAvatars, setShowAvatars] = useState(false);
   const [showEditor, setShowEditor] = useState(false);
   const [avatarCount, setAvatarCount] = useState(0);
+  const [avatarThumbs, setAvatarThumbs] = useState<{ url: string; row: number; col: number }[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(-1);
   const [dragOver, setDragOver] = useState(false);
 
@@ -59,19 +85,72 @@ export default function Home() {
     index: number;
   } | null>(null);
 
-  // Slider state
-  const [brightness, setBrightness] = useState(100);
-  const [contrast, setContrast] = useState(100);
-  const [saturation, setSaturation] = useState(100);
-  const [hue, setHue] = useState(0);
-  const [rotation, setRotation] = useState(0);
-  const [opacity, setOpacity] = useState(100);
-  const [blur, setBlur] = useState(0);
-  const [scale, setScale] = useState(100);
-  const [borderRadius, setBorderRadius] = useState(0);
-  const [grayscale, setGrayscale] = useState(0);
-  const [sepia, setSepia] = useState(0);
-  const [invert, setInvert] = useState(0);
+  // Margin/gap presets
+  interface Preset {
+    name: string;
+    marginTop: number; marginRight: number; marginBottom: number; marginLeft: number;
+    gapH: number; gapV: number;
+    cols: number; rows: number;
+  }
+  const [presets, setPresets] = useState<Preset[]>([]);
+  const [presetName, setPresetName] = useState('');
+
+  // Load presets from localStorage on mount
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('cortavatares-presets');
+      if (saved) setPresets(JSON.parse(saved));
+    } catch { /* ignore */ }
+  }, []);
+
+  const savePreset = () => {
+    const name = presetName.trim();
+    if (!name) return;
+    const preset: Preset = { name, marginTop, marginRight, marginBottom, marginLeft, gapH, gapV, cols, rows };
+    const updated = [...presets.filter(p => p.name !== name), preset];
+    setPresets(updated);
+    localStorage.setItem('cortavatares-presets', JSON.stringify(updated));
+    setPresetName('');
+    showToast(`Preset "${name}" guardado`);
+  };
+
+  const loadPreset = (preset: Preset) => {
+    setMarginTop(preset.marginTop);
+    setMarginRight(preset.marginRight);
+    setMarginBottom(preset.marginBottom);
+    setMarginLeft(preset.marginLeft);
+    setGapH(preset.gapH);
+    setGapV(preset.gapV);
+    setCols(preset.cols);
+    setRows(preset.rows);
+    showToast(`Preset "${preset.name}" cargado`);
+  };
+
+  const deletePreset = (name: string) => {
+    const updated = presets.filter(p => p.name !== name);
+    setPresets(updated);
+    localStorage.setItem('cortavatares-presets', JSON.stringify(updated));
+  };
+
+  // Current editor state
+  const [edits, setEdits] = useState<AvatarEdits>({ ...DEFAULT_EDITS });
+  // Per-avatar saved edits
+  const allEditsRef = useRef<Map<number, AvatarEdits>>(new Map());
+
+  // Convenience destructure
+  const { brightness, contrast, saturation, hue, rotation, opacity, blur, scale, borderRadius, grayscale, sepia, invert, flipH, flipV, makeSquare, padColor, padTransparent } = edits;
+
+  // Helper to update a single edit field
+  const setEdit = <K extends keyof AvatarEdits>(key: K, val: AvatarEdits[K]) => {
+    setEdits(prev => {
+      const next = { ...prev, [key]: val };
+      // Auto-save to allEdits for current avatar
+      if (selectedIndexRef.current >= 0) {
+        allEditsRef.current.set(selectedIndexRef.current, next);
+      }
+      return next;
+    });
+  };
 
   const showToast = useCallback((msg: string) => {
     const el = toastRef.current;
@@ -207,8 +286,8 @@ export default function Home() {
     const imgW = av.imgData.width;
     const imgH = av.imgData.height;
     const rot = rotation * Math.PI / 180;
-    const fH = flipHRef.current;
-    const fV = flipVRef.current;
+    const fH = flipH;
+    const fV = flipV;
     const sc = scale / 100;
 
     const scaledW = Math.round(imgW * sc);
@@ -219,22 +298,47 @@ export default function Home() {
     const rotW = Math.round(scaledW * cosR + scaledH * sinR);
     const rotH = Math.round(scaledW * sinR + scaledH * cosR);
 
-    const MAX_DISPLAY = 380;
+    const MAX_DISPLAY = 500;
     const displayScale = Math.min(1, MAX_DISPLAY / Math.max(rotW, rotH));
     const dispW = Math.round(rotW * displayScale);
     const dispH = Math.round(rotH * displayScale);
 
-    ec.width = dispW;
-    ec.height = dispH;
+    // Apply square padding if enabled
+    let canvasW = dispW;
+    let canvasH = dispH;
+    let offsetX = 0;
+    let offsetY = 0;
+
+    if (makeSquare && dispW !== dispH) {
+      const side = Math.max(dispW, dispH);
+      canvasW = side;
+      canvasH = side;
+      offsetX = Math.round((side - dispW) / 2);
+      offsetY = Math.round((side - dispH) / 2);
+    }
+
+    ec.width = canvasW;
+    ec.height = canvasH;
 
     const ctx = ec.getContext('2d')!;
-    ctx.clearRect(0, 0, dispW, dispH);
+
+    // Fill background for square padding
+    if (makeSquare && (offsetX > 0 || offsetY > 0)) {
+      if (!padTransparent) {
+        ctx.fillStyle = padColor;
+        ctx.fillRect(0, 0, canvasW, canvasH);
+      } else {
+        ctx.clearRect(0, 0, canvasW, canvasH);
+      }
+    } else {
+      ctx.clearRect(0, 0, canvasW, canvasH);
+    }
 
     // Apply border radius clipping
     if (borderRadius > 0) {
-      const r = (borderRadius / 100) * Math.min(dispW, dispH) / 2;
+      const r = (borderRadius / 100) * Math.min(canvasW, canvasH) / 2;
       ctx.beginPath();
-      ctx.roundRect(0, 0, dispW, dispH, r);
+      ctx.roundRect(0, 0, canvasW, canvasH, r);
       ctx.clip();
     }
 
@@ -259,16 +363,25 @@ export default function Home() {
     const drawH = scaledH * displayScale;
 
     ctx.save();
-    ctx.translate(dispW / 2, dispH / 2);
+    ctx.translate(offsetX + dispW / 2, offsetY + dispH / 2);
     ctx.rotate(rot);
     ctx.scale(fH ? -1 : 1, fV ? -1 : 1);
     ctx.drawImage(src, -drawW / 2, -drawH / 2, drawW, drawH);
     ctx.restore();
-  }, [brightness, contrast, saturation, hue, rotation, opacity, blur, scale, borderRadius, grayscale, sepia, invert]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [edits, selectedIndex]);
 
   useEffect(() => {
     renderEditorCanvas();
   }, [renderEditorCanvas]);
+
+  // Re-render editor after the canvas element mounts when showEditor flips to true
+  useEffect(() => {
+    if (showEditor) {
+      const t = setTimeout(() => renderEditorCanvas(), 20);
+      return () => clearTimeout(t);
+    }
+  }, [showEditor, renderEditorCanvas]);
 
   useEffect(() => {
     if (showGrid) renderGrid();
@@ -584,103 +697,54 @@ export default function Home() {
     selectedIndexRef.current = -1;
     showToast(`${avatars.length} avatares recortados`);
 
+    // Generate thumbnail URLs for React rendering
+    const thumbs = avatars.map(av => ({
+      url: imageDataToUrl(av.imgData),
+      row: av.row,
+      col: av.col,
+    }));
+    setAvatarThumbs(thumbs);
+
     setTimeout(() => {
-      renderAvatarThumbnails(avatars);
       avatarsSectionRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, 50);
   }, [cols, rows, marginTop, marginRight, marginBottom, marginLeft, showToast, getColLinePositions, getRowLinePositions, gapH, gapV]);
 
-  const renderAvatarThumbnails = (avatars: AvatarData[]) => {
-    const grid = avatarsGridRef.current;
-    if (!grid) return;
-    grid.innerHTML = '';
-
-    avatars.forEach((av, i) => {
-      const wrapper = document.createElement('div');
-      wrapper.className = 'avatar-thumb';
-      wrapper.title = `Avatar ${i + 1} (fila ${av.row + 1}, col ${av.col + 1})`;
-
-      const c = document.createElement('canvas');
-      const THUMB = 120;
-      const aspect = av.imgData.width / av.imgData.height;
-      if (aspect >= 1) {
-        c.width = THUMB;
-        c.height = Math.round(THUMB / aspect);
-      } else {
-        c.height = THUMB;
-        c.width = Math.round(THUMB * aspect);
-      }
-
-      const tmp = document.createElement('canvas');
-      tmp.width = av.imgData.width;
-      tmp.height = av.imgData.height;
-      tmp.getContext('2d')!.putImageData(av.imgData, 0, 0);
-      c.getContext('2d')!.drawImage(tmp, 0, 0, c.width, c.height);
-
-      const badge = document.createElement('span');
-      badge.className = 'avatar-index';
-      badge.textContent = String(i + 1);
-
-      wrapper.appendChild(c);
-      wrapper.appendChild(badge);
-      wrapper.addEventListener('click', () => selectAvatar(i));
-      grid.appendChild(wrapper);
-    });
-  };
-
   const selectAvatar = (index: number) => {
+    // Save current edits before switching
+    if (selectedIndexRef.current >= 0) {
+      allEditsRef.current.set(selectedIndexRef.current, { ...edits });
+    }
     selectedIndexRef.current = index;
     setSelectedIndex(index);
-    flipHRef.current = false;
-    flipVRef.current = false;
-    setBrightness(100);
-    setContrast(100);
-    setSaturation(100);
-    setHue(0);
-    setRotation(0);
-    setOpacity(100);
-    setBlur(0);
-    setScale(100);
-    setBorderRadius(0);
-    setGrayscale(0);
-    setSepia(0);
-    setInvert(0);
+    // Load saved edits for this avatar, or defaults
+    const saved = allEditsRef.current.get(index);
+    setEdits(saved ? { ...saved } : { ...DEFAULT_EDITS });
     setShowEditor(true);
-
-    document.querySelectorAll('.avatar-thumb').forEach((el, i) => {
-      el.classList.toggle('selected', i === index);
-    });
 
     setTimeout(() => {
       editorSectionRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, 50);
   };
 
-  const handleFlipH = () => {
-    flipHRef.current = !flipHRef.current;
-    renderEditorCanvas();
-  };
-
-  const handleFlipV = () => {
-    flipVRef.current = !flipVRef.current;
-    renderEditorCanvas();
-  };
+  const handleFlipH = () => setEdit('flipH', !flipH);
+  const handleFlipV = () => setEdit('flipV', !flipV);
 
   const handleResetEdits = () => {
-    flipHRef.current = false;
-    flipVRef.current = false;
-    setBrightness(100);
-    setContrast(100);
-    setSaturation(100);
-    setHue(0);
-    setRotation(0);
-    setOpacity(100);
-    setBlur(0);
-    setScale(100);
-    setBorderRadius(0);
-    setGrayscale(0);
-    setSepia(0);
-    setInvert(0);
+    const reset = { ...DEFAULT_EDITS };
+    setEdits(reset);
+    if (selectedIndexRef.current >= 0) {
+      allEditsRef.current.set(selectedIndexRef.current, reset);
+    }
+  };
+
+  const handleApplyToAll = () => {
+    const current = { ...edits };
+    const count = avatarImagesRef.current.length;
+    for (let i = 0; i < count; i++) {
+      allEditsRef.current.set(i, { ...current });
+    }
+    showToast(`Ajustes aplicados a ${count} avatares`);
   };
 
   const handleDownload = () => {
@@ -695,10 +759,61 @@ export default function Home() {
 
   const buildAvatarCanvas = (index: number) => {
     const av = avatarImagesRef.current[index];
+    const e = allEditsRef.current.get(index) || DEFAULT_EDITS;
+    const imgW = av.imgData.width;
+    const imgH = av.imgData.height;
+    const sc = e.scale / 100;
+    const rot = e.rotation * Math.PI / 180;
+
+    const scaledW = Math.round(imgW * sc);
+    const scaledH = Math.round(imgH * sc);
+    const cosR = Math.abs(Math.cos(rot));
+    const sinR = Math.abs(Math.sin(rot));
+    const rotW = Math.round(scaledW * cosR + scaledH * sinR);
+    const rotH = Math.round(scaledW * sinR + scaledH * cosR);
+
+    let cW = rotW, cH = rotH, offX = 0, offY = 0;
+    if (e.makeSquare && rotW !== rotH) {
+      const side = Math.max(rotW, rotH);
+      cW = side; cH = side;
+      offX = Math.round((side - rotW) / 2);
+      offY = Math.round((side - rotH) / 2);
+    }
+
     const c = document.createElement('canvas');
-    c.width = av.imgData.width;
-    c.height = av.imgData.height;
-    c.getContext('2d')!.putImageData(av.imgData, 0, 0);
+    c.width = cW; c.height = cH;
+    const ctx = c.getContext('2d')!;
+
+    if (e.makeSquare && (offX > 0 || offY > 0) && !e.padTransparent) {
+      ctx.fillStyle = e.padColor;
+      ctx.fillRect(0, 0, cW, cH);
+    }
+
+    if (e.borderRadius > 0) {
+      const r = (e.borderRadius / 100) * Math.min(cW, cH) / 2;
+      ctx.beginPath(); ctx.roundRect(0, 0, cW, cH, r); ctx.clip();
+    }
+
+    ctx.filter = [
+      `brightness(${e.brightness}%)`, `contrast(${e.contrast}%)`,
+      `saturate(${e.saturation}%)`, `hue-rotate(${e.hue}deg)`,
+      `opacity(${e.opacity}%)`,
+      e.blur > 0 ? `blur(${e.blur}px)` : '',
+      e.grayscale > 0 ? `grayscale(${e.grayscale}%)` : '',
+      e.sepia > 0 ? `sepia(${e.sepia}%)` : '',
+      e.invert > 0 ? `invert(${e.invert}%)` : '',
+    ].filter(Boolean).join(' ');
+
+    const src = document.createElement('canvas');
+    src.width = imgW; src.height = imgH;
+    src.getContext('2d')!.putImageData(av.imgData, 0, 0);
+
+    ctx.save();
+    ctx.translate(offX + rotW / 2, offY + rotH / 2);
+    ctx.rotate(rot);
+    ctx.scale(e.flipH ? -1 : 1, e.flipV ? -1 : 1);
+    ctx.drawImage(src, -scaledW / 2, -scaledH / 2, scaledW, scaledH);
+    ctx.restore();
     return c;
   };
 
@@ -731,7 +846,7 @@ export default function Home() {
     setShowGrid(false);
     setShowAvatars(false);
     setShowEditor(false);
-    if (avatarsGridRef.current) avatarsGridRef.current.innerHTML = '';
+    setAvatarThumbs([]);
     uploadSectionRef.current?.scrollIntoView({ behavior: 'smooth' });
     showToast('Listo para nueva imagen');
   };
@@ -826,6 +941,32 @@ export default function Home() {
                 <MarginSlider label="Horizontal" value={gapH} onChange={setGapH} />
                 <MarginSlider label="Vertical" value={gapV} onChange={setGapV} />
               </div>
+              <div style={{ borderTop: '1px solid var(--border)', marginTop: 8, paddingTop: 8 }}>
+                <span className="margins-title">Presets</span>
+                <div className="preset-save-row">
+                  <input
+                    type="text"
+                    placeholder="Nombre del preset"
+                    value={presetName}
+                    onChange={(e) => setPresetName(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && savePreset()}
+                    className="preset-input"
+                  />
+                  <button className="btn btn-primary btn-sm" onClick={savePreset}>Guardar</button>
+                </div>
+                {presets.length > 0 && (
+                  <div className="preset-list">
+                    {presets.map((p) => (
+                      <div key={p.name} className="preset-item">
+                        <button className="preset-load-btn" onClick={() => loadPreset(p)} title={`${p.cols}x${p.rows} · M: ${p.marginTop}/${p.marginRight}/${p.marginBottom}/${p.marginLeft} · Gap: ${p.gapH}/${p.gapV}`}>
+                          {p.name}
+                        </button>
+                        <button className="preset-delete-btn" onClick={() => deletePreset(p.name)} title="Eliminar">×</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
 
             <div id="canvas-container">
@@ -857,7 +998,33 @@ export default function Home() {
             <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: 14 }}>
               Haz clic en un avatar para editarlo.
             </p>
-            <div id="avatars-grid" ref={avatarsGridRef} />
+            <div id="avatars-grid">
+              {avatarThumbs.map((thumb, i) => (
+                <Tooltip key={i}>
+                  <TooltipTrigger asChild>
+                    <div
+                      className={`avatar-thumb${selectedIndex === i ? ' selected' : ''}`}
+                      onClick={() => selectAvatar(i)}
+                    >
+                      <Avatar className="size-full rounded-none">
+                        <AvatarImage src={thumb.url} alt={`Avatar ${i + 1}`} className="rounded-none object-contain" />
+                        <AvatarFallback className="rounded-none text-lg">{i + 1}</AvatarFallback>
+                      </Avatar>
+                      <span className="avatar-index">{i + 1}</span>
+                    </div>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="avatar-tooltip-content">
+                    <div className="avatar-preview-sizes">
+                      {[96, 64, 48, 32, 24].map(size => (
+                        <div key={size} className="avatar-preview-circle" style={{ width: size, height: size }}>
+                          <img src={thumb.url} alt={`${size}px`} />
+                        </div>
+                      ))}
+                    </div>
+                  </TooltipContent>
+                </Tooltip>
+              ))}
+            </div>
           </section>
         )}
 
@@ -871,25 +1038,58 @@ export default function Home() {
               </div>
 
               <div className="editor-controls">
-                <SliderControl label="Brillo" suffix="%" value={brightness} min={0} max={200} onChange={setBrightness} />
-                <SliderControl label="Contraste" suffix="%" value={contrast} min={0} max={200} onChange={setContrast} />
-                <SliderControl label="Saturación" suffix="%" value={saturation} min={0} max={300} onChange={setSaturation} />
-                <SliderControl label="Tono (hue)" suffix="°" value={hue} min={-180} max={180} onChange={setHue} />
-                <SliderControl label="Rotación" suffix="°" value={rotation} min={-180} max={180} onChange={setRotation} />
-                <SliderControl label="Opacidad" suffix="%" value={opacity} min={0} max={100} onChange={setOpacity} />
-                <SliderControl label="Desenfoque" suffix="px" value={blur} min={0} max={20} onChange={setBlur} />
-                <SliderControl label="Escala" suffix="%" value={scale} min={10} max={200} onChange={setScale} />
-                <SliderControl label="Bordes redondos" suffix="%" value={borderRadius} min={0} max={100} onChange={setBorderRadius} />
-                <SliderControl label="Escala de grises" suffix="%" value={grayscale} min={0} max={100} onChange={setGrayscale} />
-                <SliderControl label="Sepia" suffix="%" value={sepia} min={0} max={100} onChange={setSepia} />
-                <SliderControl label="Invertir" suffix="%" value={invert} min={0} max={100} onChange={setInvert} />
+                <SliderControl label="Brillo" suffix="%" value={brightness} min={0} max={200} onChange={(v) => setEdit('brightness', v)} />
+                <SliderControl label="Contraste" suffix="%" value={contrast} min={0} max={200} onChange={(v) => setEdit('contrast', v)} />
+                <SliderControl label="Saturación" suffix="%" value={saturation} min={0} max={300} onChange={(v) => setEdit('saturation', v)} />
+                <SliderControl label="Tono (hue)" suffix="°" value={hue} min={-180} max={180} onChange={(v) => setEdit('hue', v)} />
+                <SliderControl label="Rotación" suffix="°" value={rotation} min={-180} max={180} onChange={(v) => setEdit('rotation', v)} />
+                <SliderControl label="Opacidad" suffix="%" value={opacity} min={0} max={100} onChange={(v) => setEdit('opacity', v)} />
+                <SliderControl label="Desenfoque" suffix="px" value={blur} min={0} max={20} onChange={(v) => setEdit('blur', v)} />
+                <SliderControl label="Escala" suffix="%" value={scale} min={10} max={200} onChange={(v) => setEdit('scale', v)} />
+                <SliderControl label="Bordes redondos" suffix="%" value={borderRadius} min={0} max={100} onChange={(v) => setEdit('borderRadius', v)} />
+                <SliderControl label="Escala de grises" suffix="%" value={grayscale} min={0} max={100} onChange={(v) => setEdit('grayscale', v)} />
+                <SliderControl label="Sepia" suffix="%" value={sepia} min={0} max={100} onChange={(v) => setEdit('sepia', v)} />
+                <SliderControl label="Invertir" suffix="%" value={invert} min={0} max={100} onChange={(v) => setEdit('invert', v)} />
 
                 <div className="flip-btns">
                   <button className="btn btn-ghost btn-sm" onClick={handleFlipH}>↔ Voltear H</button>
                   <button className="btn btn-ghost btn-sm" onClick={handleFlipV}>↕ Voltear V</button>
                 </div>
 
+                <div className="square-pad-section">
+                  <label className="square-toggle">
+                    <input
+                      type="checkbox"
+                      checked={makeSquare}
+                      onChange={(e) => setEdit('makeSquare', e.target.checked)}
+                    />
+                    <span>Cuadrar imagen</span>
+                  </label>
+                  {makeSquare && (
+                    <div className="pad-color-row">
+                      <label className="square-toggle">
+                        <input
+                          type="checkbox"
+                          checked={padTransparent}
+                          onChange={(e) => setEdit('padTransparent', e.target.checked)}
+                        />
+                        <span>Transparente</span>
+                      </label>
+                      {!padTransparent && (
+                        <input
+                          type="color"
+                          value={padColor}
+                          onChange={(e) => setEdit('padColor', e.target.value)}
+                          className="color-picker"
+                          title="Color de relleno"
+                        />
+                      )}
+                    </div>
+                  )}
+                </div>
+
                 <button className="btn btn-ghost btn-sm" onClick={handleResetEdits}>↺ Restablecer</button>
+                <button className="btn btn-primary btn-sm" onClick={handleApplyToAll}>Aplicar a todos</button>
 
                 <div className="editor-actions">
                   <button className="btn btn-accent" onClick={handleDownload}>⬇ Descargar</button>
