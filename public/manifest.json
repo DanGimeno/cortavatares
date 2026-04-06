@@ -1,0 +1,16 @@
+{
+  "name": "Cortavatares",
+  "short_name": "Cortavatares",
+  "description": "Recorta y edita avatares desde una imagen",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f0f2f5",
+  "theme_color": "#5c6bc0",
+  "icons": [
+    {
+      "src": "/favicon.ico",
+      "sizes": "256x256",
+      "type": "image/x-icon"
+    }
+  ]
+}
